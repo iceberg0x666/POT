@@ -1,0 +1,690 @@
+#!/usr/bin/env python3
+"""
+╔══════════════════════════════════════════════════════════════╗
+║  POT — Professional Offensive Tool                          ║
+║  Automated Bug Bounty Reconnaissance Framework              ║
+║  Version 1.0.0                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Usage:
+    sudo pot https://target.com
+    sudo pot https://target.com --notarget admin.target.com,staging.target.com
+    sudo pot target.com --quick --threads 100
+    sudo pot target.com --passive
+    sudo pot target.com --tor
+    sudo pot target.com --proxy socks5://127.0.0.1:9050
+    sudo pot target.com --header "Cookie: session=abc123"
+    sudo pot --targets targets.txt --tor
+    sudo pot target.com --resume
+    sudo pot -o /path/to/output
+"""
+
+import os
+import sys
+import argparse
+import signal
+import traceback
+from datetime import datetime
+
+# Ensure potlib is importable
+script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, script_dir)
+
+from potlib.ui import (
+    print_banner, log_info, log_warning, log_error, log_phase,
+    print_tool_status, print_config, Colors, VERSION
+)
+from potlib.engine import (
+    PotConfig, Runner, ScopeManager, ResultStore,
+    check_root, check_internet, optimize_threads, get_system_info
+)
+from potlib import passive, active, vuln
+from potlib.report import generate_report
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ARGUMENT PARSER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog='pot',
+        description=f'{Colors.BCYAN}POT{Colors.RESET} — Professional Offensive Tool | '
+                    f'Automated Bug Bounty Reconnaissance v{VERSION}',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+{Colors.BOLD}Examples:{Colors.RESET}
+  sudo pot https://example.com
+  sudo pot example.com --notarget admin.example.com,internal.example.com
+  sudo pot example.com --quick --threads 100
+  sudo pot example.com --passive -o ./results
+  sudo pot example.com --tor
+  sudo pot example.com --proxy socks5://127.0.0.1:8080
+  sudo pot example.com --header "Authorization: Bearer TOKEN"
+  sudo pot --targets targets.txt
+  sudo pot example.com --resume
+  sudo pot example.com --config pot.yaml
+
+{Colors.DIM}Professional Offensive Tool v{VERSION}{Colors.RESET}
+"""
+    )
+
+    # Target (optional when --targets is used)
+    parser.add_argument(
+        'target', nargs='?', default=None,
+        help='Target URL or domain (e.g., https://example.com or example.com)'
+    )
+
+    # Multi-target
+    parser.add_argument(
+        '--targets',
+        help='File containing list of targets (one per line)',
+        default=None
+    )
+
+    # Scope
+    parser.add_argument(
+        '--notarget', '-nt',
+        help='Comma-separated list of targets to exclude from scanning '
+             '(e.g., admin.example.com,staging.example.com)',
+        default=''
+    )
+    parser.add_argument(
+        '--scope-file',
+        help='File with scope rules (one domain per line, prefix with ! to exclude)',
+        default=None
+    )
+
+    # Output
+    parser.add_argument(
+        '-o', '--output',
+        help='Output directory for results',
+        default=None
+    )
+
+    # Performance
+    parser.add_argument(
+        '-t', '--threads',
+        help='Number of concurrent threads (default: 50)',
+        type=int,
+        default=50
+    )
+    parser.add_argument(
+        '--timeout',
+        help='Per-tool timeout in seconds (default: 600)',
+        type=int,
+        default=600
+    )
+    parser.add_argument(
+        '--rate-limit', '-rl',
+        help='Rate limit in requests per second (default: 150)',
+        type=int,
+        default=150
+    )
+
+    # Modes
+    parser.add_argument(
+        '--passive', '-p',
+        help='Passive reconnaissance only (no active probing)',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--quick', '-q',
+        help='Quick mode — fewer tools, faster results',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--verbose', '-v',
+        help='Verbose output with debug messages',
+        action='store_true'
+    )
+
+    # Resume
+    parser.add_argument(
+        '--resume',
+        help='Resume a previously interrupted scan',
+        action='store_true'
+    )
+
+    # Tool options
+    parser.add_argument(
+        '--skip',
+        help='Comma-separated list of modules to skip',
+        default=''
+    )
+    parser.add_argument(
+        '--resolvers',
+        help='Path to custom DNS resolvers file',
+        default=None
+    )
+    parser.add_argument(
+        '--wordlist', '-w',
+        help='Path to custom wordlist',
+        default=None
+    )
+    parser.add_argument(
+        '--nuclei-templates',
+        help='Path to custom nuclei templates',
+        default=None
+    )
+    parser.add_argument(
+        '--header',
+        help='Custom header to add to requests (can be used multiple times)',
+        action='append',
+        default=[]
+    )
+
+    # Proxy / Tor
+    parser.add_argument(
+        '--proxy',
+        help='Proxy URL (e.g., socks5://127.0.0.1:9050, http://127.0.0.1:8080)',
+        default=None
+    )
+    parser.add_argument(
+        '--tor',
+        help='Route all traffic through Tor (socks5://127.0.0.1:9050)',
+        action='store_true'
+    )
+
+    # Config file
+    parser.add_argument(
+        '--config',
+        help='YAML/JSON config file (overridden by CLI flags)',
+        default=None
+    )
+
+    # Meta
+    parser.add_argument(
+        '--version', '-V',
+        action='version',
+        version=f'POT v{VERSION}'
+    )
+    parser.add_argument(
+        '--check-tools',
+        help='Check tool availability and exit',
+        action='store_true'
+    )
+
+    return parser
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIG FILE LOADING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_config_file(filepath):
+    """Load config from YAML or JSON file. Returns dict."""
+    if not filepath or not os.path.exists(filepath):
+        return {}
+    try:
+        with open(filepath) as f:
+            content = f.read()
+        # Try JSON first
+        import json
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        # Try YAML
+        try:
+            import yaml
+            return yaml.safe_load(content) or {}
+        except ImportError:
+            # YAML not installed, try simple key:value parsing
+            config = {}
+            for line in content.split('\n'):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if ':' in line:
+                    key, val = line.split(':', 1)
+                    key = key.strip().replace('-', '_')
+                    val = val.strip()
+                    # Type conversion
+                    if val.lower() in ('true', 'yes'):
+                        val = True
+                    elif val.lower() in ('false', 'no'):
+                        val = False
+                    elif val.isdigit():
+                        val = int(val)
+                    config[key] = val
+            return config
+    except Exception:
+        return {}
+
+
+def merge_config(args, file_config):
+    """Merge config file values into args (CLI takes priority)."""
+    defaults = {
+        'threads': 50, 'timeout': 600, 'rate_limit': 150,
+        'passive': False, 'quick': False, 'verbose': False,
+        'tor': False, 'resume': False,
+    }
+    for key, default_val in defaults.items():
+        cli_val = getattr(args, key, None)
+        # If CLI arg is at default, use config file value
+        if cli_val == default_val and key in file_config:
+            setattr(args, key, file_config[key])
+
+    # String args: only override if CLI is None/empty
+    for key in ['proxy', 'resolvers', 'wordlist', 'nuclei_templates',
+                'output', 'scope_file', 'notarget', 'skip']:
+        cli_val = getattr(args, key, None)
+        if not cli_val and key in file_config:
+            setattr(args, key, file_config[key])
+
+    # Headers from config file
+    if not args.header and 'headers' in file_config:
+        h = file_config['headers']
+        args.header = h if isinstance(h, list) else [h]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TOOL AVAILABILITY CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ALL_TOOLS = [
+    # Core / system
+    'curl', 'dig', 'host', 'whois', 'openssl', 'nmap', 'tor',
+    # Subdomain enumeration
+    'subfinder', 'amass', 'assetfinder', 'findomain', 'shuffledns', 'chaos',
+    # DNS
+    'dnsx', 'massdns', 'dnsrecon',
+    # HTTP
+    'httpx', 'httprobe',
+    # Port scanning
+    'masscan', 'naabu',
+    # Crawling
+    'katana', 'gospider', 'hakrawler',
+    # Directory
+    'ffuf', 'gobuster', 'dirsearch',
+    # Parameters
+    'paramspider', 'arjun',
+    # JavaScript
+    'linkfinder',
+    # Screenshots
+    'gowitness', 'eyewitness', 'cutycapt',
+    # Vulnerability
+    'nuclei', 'sslscan', 'testssl', 'subjack',
+    # WAF
+    'wafw00f',
+    # CMS
+    'wpscan',
+    # Other
+    'whatweb', 'webanalyze', 'theHarvester', 'theharvester',
+    'waybackurls', 'gau',
+]
+
+
+def check_tool_availability(runner):
+    """Check and display tool availability."""
+    status = runner.check_tools(ALL_TOOLS)
+    print_tool_status(status)
+
+    available = sum(1 for v in status.values() if v)
+    total = len(status)
+    log_info(f"Tools available: {available}/{total}")
+
+    # Minimum required
+    essentials = ['curl', 'dig', 'nmap']
+    missing_essentials = [t for t in essentials if not status.get(t)]
+    if missing_essentials:
+        log_warning(f"Missing essential tools: {', '.join(missing_essentials)}")
+        log_warning("Run the install script: sudo bash install.sh")
+
+    return status
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SIGNAL HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_results_ref = None
+_config_ref = None
+_completed_modules = set()
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully — save partial results + checkpoint."""
+    print(f"\n\n{Colors.BYELLOW}[!] Scan interrupted by user{Colors.RESET}")
+    if _results_ref and _config_ref:
+        log_info("Saving partial results and checkpoint...")
+        try:
+            _results_ref.save_to_disk()
+            _results_ref.save_checkpoint(_completed_modules)
+            generate_report(_config_ref, _results_ref)
+        except Exception:
+            _results_ref.save_to_disk()
+        log_info(f"Partial results saved to: {_config_ref.output_dir}")
+        log_info(f"Resume with: sudo pot {_config_ref.target} --resume -o {_config_ref.output_dir}")
+    sys.exit(130)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SCAN RUNNER WITH RESUME SUPPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_phase_with_resume(phase_name, phase_func, config, runner, scope,
+                          results, completed_modules):
+    """Run a phase, tracking completed modules for resume."""
+    global _completed_modules
+    _completed_modules = completed_modules
+
+    # Monkey-patch the phase's run_all to track completed modules
+    original_skip = set(config.skip_modules)
+    config.skip_modules = list(original_skip | completed_modules)
+
+    phase_func(config, runner, scope, results)
+
+    # Restore original skip list
+    config.skip_modules = list(original_skip)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SINGLE TARGET SCAN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def scan_target(args, target, is_multi=False):
+    """Run full scan pipeline on a single target."""
+    global _results_ref, _config_ref, _completed_modules
+
+    # Resolve proxy: --tor flag takes priority
+    proxy_val = None
+    if args.tor:
+        proxy_val = 'tor'
+    elif args.proxy:
+        proxy_val = args.proxy
+
+    notargets = [t.strip() for t in args.notarget.split(',') if t.strip()]
+    skip_modules = [m.strip() for m in args.skip.split(',') if m.strip()]
+
+    config = PotConfig(
+        target=target,
+        notargets=notargets,
+        output_dir=args.output,
+        threads=args.threads,
+        timeout=args.timeout,
+        rate_limit=args.rate_limit,
+        verbose=args.verbose,
+        passive_only=args.passive,
+        quick=args.quick,
+        resolvers=args.resolvers,
+        wordlist=args.wordlist,
+        nuclei_templates=args.nuclei_templates,
+        skip_modules=skip_modules,
+        proxy=proxy_val,
+        headers=args.header if args.header else None,
+        scope_file=args.scope_file if hasattr(args, 'scope_file') else None,
+    )
+
+    # Initialize core components
+    runner = Runner(config)
+    scope = ScopeManager(config.target_domain, notargets)
+
+    # Load scope file if provided
+    if config.scope_file:
+        scope.load_scope_file(config.scope_file)
+        log_info(f"Loaded scope file: {config.scope_file}")
+
+    results = ResultStore(config.output_dir)
+
+    # Resume support
+    completed_modules = set()
+    if args.resume:
+        completed_modules = ResultStore.load_checkpoint(config.output_dir)
+        if completed_modules:
+            log_info(f"Resuming scan — {len(completed_modules)} modules already completed")
+            log_info(f"Completed: {', '.join(sorted(completed_modules))}")
+            results.load_from_disk()
+        else:
+            log_info("No checkpoint found — starting fresh scan")
+
+    # Store references for signal handler
+    _results_ref = results
+    _config_ref = config
+    _completed_modules = completed_modules
+
+    if not is_multi:
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+        except ValueError:
+            pass
+        try:
+            signal.signal(signal.SIGTERM, signal_handler)
+        except ValueError:
+            pass
+
+    # ── Pre-flight checks ──
+    if not is_multi:
+        log_info(f"POT v{VERSION} starting...")
+
+        if not check_root():
+            log_warning("Not running as root — some tools may not work properly")
+
+        if not check_internet():
+            log_error("No internet connectivity detected!")
+            sys.exit(1)
+
+        log_info("Internet connectivity: OK")
+
+        # Proxy / Tor check
+        if config.proxy:
+            proxy_label = f"Tor ({config.proxy})" if config.proxy_type == 'tor' else config.proxy
+            log_info(f"Proxy: {Colors.BCYAN}{proxy_label}{Colors.RESET}")
+
+            import subprocess as _sp
+            try:
+                if config.proxy_type == 'tor':
+                    import socket as _sock
+                    s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                    s.settimeout(5)
+                    socks_parts = config.proxy.replace('socks5://', '').split(':')
+                    socks_host = socks_parts[0]
+                    socks_port = int(socks_parts[1]) if len(socks_parts) > 1 else 9050
+                    result = s.connect_ex((socks_host, socks_port))
+                    s.close()
+                    if result == 0:
+                        log_info(f"{Colors.BGREEN}Tor SOCKS proxy reachable on port {socks_port}{Colors.RESET}")
+                        tor_ip = _sp.run(
+                            ['curl', '-s', '--socks5-hostname', f'{socks_host}:{socks_port}',
+                             '-m', '15', 'https://api.ipify.org'],
+                            capture_output=True, text=True, timeout=20
+                        )
+                        if tor_ip.returncode == 0 and tor_ip.stdout.strip():
+                            log_info(f"Tor exit IP: {Colors.BGREEN}{tor_ip.stdout.strip()}{Colors.RESET}")
+                    else:
+                        log_error(f"Tor not reachable on {socks_host}:{socks_port}")
+                        log_error("Start Tor: sudo systemctl start tor")
+                        sys.exit(1)
+                else:
+                    proxy_check = _sp.run(
+                        ['curl', '-s', '--proxy', config.proxy, '-m', '10', 'https://api.ipify.org'],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    if proxy_check.returncode == 0 and proxy_check.stdout.strip():
+                        log_info(f"Proxy exit IP: {Colors.BGREEN}{proxy_check.stdout.strip()}{Colors.RESET}")
+                    else:
+                        log_warning("Proxy check failed — proceeding anyway")
+            except Exception as e:
+                log_warning(f"Proxy check error: {e} — proceeding anyway")
+
+        sys_info = get_system_info()
+        config = optimize_threads(config)
+        log_info(f"System: {sys_info['cpus']} CPUs, {sys_info['memory_gb']}GB RAM")
+
+    # Print configuration
+    print_config(config)
+
+    if not is_multi:
+        check_tool_availability(runner)
+
+    # Save config
+    import json
+    config_file = os.path.join(config.output_dir, 'scan_config.json')
+    with open(config_file, 'w') as f:
+        json.dump(config.to_dict(), f, indent=2, default=str)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  EXECUTION PIPELINE
+    # ══════════════════════════════════════════════════════════════════════
+
+    log_info(f"Target: {Colors.BCYAN}{config.target}{Colors.RESET}")
+    if notargets:
+        log_info(f"Excluded: {Colors.BYELLOW}{', '.join(notargets)}{Colors.RESET}")
+    if config.proxy:
+        proxy_label = "Tor" if config.proxy_type == 'tor' else config.proxy
+        log_info(f"Routing: {Colors.BCYAN}{proxy_label}{Colors.RESET}")
+    if config.headers:
+        log_info(f"Custom headers: {len(config.headers)} header(s)")
+    log_info(f"Output: {config.output_dir}")
+    print()
+
+    try:
+        # ── Phase 1: Passive Reconnaissance ──
+        passive.run_all(config, runner, scope, results)
+        completed_modules.update(['whois', 'dns', 'subdomains', 'crt.sh',
+                                   'wayback', 'tech', 'emails', 'asn',
+                                   'github_dork', 'google_dork'])
+        results.save_checkpoint(completed_modules)
+
+        # ── Phase 2: Active Reconnaissance ──
+        active.run_all(config, runner, scope, results)
+        completed_modules.update(['waf_detect', 'resolve', 'ports', 'httpx',
+                                   'crawl', 'dirs', 'params', 'js',
+                                   'screenshots', 'cloud_buckets'])
+        results.save_checkpoint(completed_modules)
+
+        # ── Phase 3: Vulnerability Assessment ──
+        vuln.run_all(config, runner, scope, results)
+        completed_modules.update(['nuclei', 'ssl', 'headers', 'cors',
+                                   'takeover', 'open_redirect', 'crlf',
+                                   'host_header', 'misconfig', 'graphql', 'cms'])
+        results.save_checkpoint(completed_modules)
+
+        # ── Phase 4: Report Generation ──
+        json_path, html_path = generate_report(config, results)
+
+        # Print network health
+        health = runner.get_health_stats()
+        log_info(f"Network: {health['total_requests']} requests, "
+                 f"{health['success_rate']} success, "
+                 f"{health['avg_response_ms']} avg response, "
+                 f"{health['timeout_count']} timeouts")
+
+    except KeyboardInterrupt:
+        signal_handler(None, None)
+    except Exception as e:
+        log_error(f"Unexpected error: {e}")
+        if config.verbose:
+            traceback.print_exc()
+        log_info("Saving partial results...")
+        results.save_to_disk()
+        results.save_checkpoint(completed_modules)
+        try:
+            generate_report(config, results)
+        except Exception:
+            pass
+        log_info(f"Partial results saved to: {config.output_dir}")
+        log_info(f"Resume: sudo pot {target} --resume -o {config.output_dir}")
+        if is_multi:
+            return  # Don't exit, continue with next target
+        sys.exit(1)
+
+    log_info(f"{Colors.BGREEN}Scan completed!{Colors.RESET}")
+    log_info(f"Time: {datetime.now() - config.start_time}")
+
+    return config.output_dir
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    global _results_ref, _config_ref
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # Print banner
+    print_banner()
+
+    # Load config file if provided
+    if args.config:
+        file_config = load_config_file(args.config)
+        if file_config:
+            merge_config(args, file_config)
+            log_info(f"Loaded config: {args.config}")
+
+    # Check tools only mode
+    if args.check_tools:
+        dummy_config = PotConfig(target='check.example.com')
+        runner = Runner(dummy_config)
+        check_tool_availability(runner)
+        sys.exit(0)
+
+    # Determine target list
+    targets = []
+    if args.targets:
+        # Multi-target mode
+        if not os.path.exists(args.targets):
+            log_error(f"Targets file not found: {args.targets}")
+            sys.exit(1)
+        with open(args.targets) as f:
+            targets = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+        if not targets:
+            log_error("Targets file is empty")
+            sys.exit(1)
+        log_info(f"Multi-target mode: {len(targets)} targets loaded")
+    elif args.target:
+        targets = [args.target]
+    else:
+        parser.error("target is required (or use --targets <file>)")
+
+    # Pre-flight (once for multi-target)
+    if len(targets) > 1:
+        log_info(f"POT v{VERSION} starting...")
+        if not check_root():
+            log_warning("Not running as root — some tools may not work properly")
+        if not check_internet():
+            log_error("No internet connectivity detected!")
+            sys.exit(1)
+        log_info("Internet connectivity: OK")
+
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+        except ValueError:
+            pass
+        try:
+            signal.signal(signal.SIGTERM, signal_handler)
+        except ValueError:
+            pass
+
+    # Run scan(s)
+    results_dirs = []
+    for i, target in enumerate(targets):
+        if len(targets) > 1:
+            log_phase(f"TARGET {i+1}/{len(targets)} — {target}")
+
+        is_multi = len(targets) > 1
+        # For multi-target, create separate output dirs
+        if is_multi and not args.output:
+            args.output = None  # Let PotConfig auto-generate per target
+
+        result_dir = scan_target(args, target, is_multi=is_multi)
+        if result_dir:
+            results_dirs.append(result_dir)
+
+        # Reset output for next target
+        if is_multi:
+            args.output = None
+
+    if len(targets) > 1:
+        log_info(f"\n{Colors.BGREEN}All {len(targets)} targets scanned!{Colors.RESET}")
+        for d in results_dirs:
+            log_info(f"  → {d}")
+
+    log_info(f"Total time: {datetime.now().strftime('%H:%M:%S')}")
+
+
+if __name__ == '__main__':
+    main()
