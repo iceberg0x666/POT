@@ -99,7 +99,7 @@ sudo pot https://example.com
 sudo pot example.com \
     --tor \
     --header "Authorization: Bearer xyz" \
-    --notarget "admin.example.com" \ (notarget command is for specifying targets not in scope so "POT" takes no action on them)
+    --notarget "admin.example.com" \ (notarget is for specifying targets not in scope so "POT" takes no action on them)
     --threads 100 \
     -o ./results
 ```
