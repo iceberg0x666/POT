@@ -20,12 +20,9 @@
 ---
 
 ## Disclaimer
-> **⚠️ FOR EDUCATIONAL AND AUTHORIZED USE ONLY ⚠️**
+> ⚠️ AUTHORIZED USE ONLY ⚠️
+> The developers and contributors assume no liability and are not responsible for any misuse or damage caused by this program.
 > 
-> This tool is strictly designed for cybersecurity professionals, penetration testers, and bug bounty hunters to use on targets where they have **explicit, written permission** to test. 
-> 
-> The developers and contributors assume no liability and are not responsible for any misuse or damage caused by this program. Do not use this tool on any infrastructure you do not own or are not explicitly authorized to assess.
-
 ---
 
 ## What is POT?
