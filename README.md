@@ -56,7 +56,7 @@ POT weaponizes the discovered attack surface:
 
 ### Phase 4: Reporting
 *   Saves all raw data into a structured directory (e.g., `target.com/subdomains`, `target.com/vulns`).
-*   Generates a beautiful, dark-themed interactive HTML report and a machine-readable JSON file.
+*   Generates a .csv & .json file.
 
 ---
 
