@@ -20,8 +20,8 @@
 ---
 
 ## Disclaimer
-> ⚠️ AUTHORIZED USE ONLY ⚠️
-> The developers and contributors assume no liability and are not responsible for any misuse or damage caused by this program.
+
+> The developer assume no liability and are not responsible for any misuse or damage caused by this program.
 > 
 ---
 
