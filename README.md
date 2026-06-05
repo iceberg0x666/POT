@@ -1,11 +1,10 @@
 <h1 align="center">
   <br>
-  <br>
   POT - Professional Offensive Tool
   <br>
 </h1>
 
-<h4 align="center">The Ultimate Automated Bug Bounty Reconnaissance Engine</h4>
+<h4 align="center">Ultimate Automated Bug Bounty Reconnaissance Engine</h4>
 
 <p align="center">
   <a href="#disclaimer">Disclaimer</a> •
