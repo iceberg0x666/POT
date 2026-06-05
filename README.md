@@ -85,7 +85,7 @@ sudo ./install.sh
 ---
 
 ## Usage
-The tool features a beautifully minimal, grep-able interface styled heavily after Nuclei.
+The developer assume no liability and are not responsible for any misuse or damage caused by this program
 
 ### Basic Scan
 ```bash
@@ -97,7 +97,7 @@ sudo pot https://example.com
 sudo pot example.com \
     --tor \
     --header "Authorization: Bearer xyz" \
-    --notarget "admin.example.com" \ (notarget is for specifying targets not in scope so "POT" takes no action on them)
+    --notarget "is for url's not in scope for multiple url's use "," \
     --threads 100 \
     -o ./results
 ```
@@ -105,7 +105,7 @@ sudo pot example.com \
 ### Multi-Target Batch Scanning
 Feed it a list of 100 bug bounty targets and let it run overnight.
 ```bash
-sudo pot --targets bounty_list.txt --resume
+sudo pot --targets path_bountylist.txt --resume
 ```
 
 ### Passive Intel Only (Stealth Mode)
