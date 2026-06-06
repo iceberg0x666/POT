@@ -1,0 +1,4 @@
+# Enforce Unix line endings (LF) for scripts to prevent execution errors on Linux
+*.sh text eol=lf
+*.py text eol=lf
+pot text eol=lf
