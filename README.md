@@ -76,7 +76,7 @@ POT is designed to run unsupervised for days without crashing.
 POT requires a Kali Linux environment. The setup script automatically installs Go, Python dependencies, SecLists, and over 30 external tools natively.
 
 ```bash
-git clone https://github.com/yourusername/pot.git
+git clone the repo
 cd pot
 chmod +x install.sh
 sudo ./install.sh
